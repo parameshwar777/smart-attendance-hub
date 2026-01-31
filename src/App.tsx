@@ -10,8 +10,11 @@ import Index from "./pages/Index";
 import Login from "./pages/Login";
 import Dashboard from "./pages/Dashboard";
 import Departments from "./pages/Departments";
+import Teachers from "./pages/Teachers";
 import Students from "./pages/Students";
 import RegisterStudent from "./pages/RegisterStudent";
+import FaceTraining from "./pages/FaceTraining";
+import BulkUpload from "./pages/BulkUpload";
 import Classes from "./pages/Classes";
 import TakeAttendance from "./pages/TakeAttendance";
 import Analytics from "./pages/Analytics";
@@ -89,6 +92,14 @@ function AppRoutes() {
         }
       />
       <Route
+        path="/teachers"
+        element={
+          <ProtectedRoute>
+            <Teachers />
+          </ProtectedRoute>
+        }
+      />
+      <Route
         path="/students"
         element={
           <ProtectedRoute>
@@ -101,6 +112,22 @@ function AppRoutes() {
         element={
           <ProtectedRoute>
             <RegisterStudent />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/face-training"
+        element={
+          <ProtectedRoute>
+            <FaceTraining />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/bulk-upload"
+        element={
+          <ProtectedRoute>
+            <BulkUpload />
           </ProtectedRoute>
         }
       />
