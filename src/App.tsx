@@ -10,6 +10,7 @@ import Index from "./pages/Index";
 import Login from "./pages/Login";
 import Dashboard from "./pages/Dashboard";
 import Departments from "./pages/Departments";
+import Subjects from "./pages/Subjects";
 import Teachers from "./pages/Teachers";
 import Students from "./pages/Students";
 import RegisterStudent from "./pages/RegisterStudent";
@@ -18,6 +19,7 @@ import BulkUpload from "./pages/BulkUpload";
 import Classes from "./pages/Classes";
 import TakeAttendance from "./pages/TakeAttendance";
 import Analytics from "./pages/Analytics";
+import Settings from "./pages/Settings";
 import NotFound from "./pages/NotFound";
 
 const queryClient = new QueryClient();
@@ -92,6 +94,14 @@ function AppRoutes() {
         }
       />
       <Route
+        path="/subjects"
+        element={
+          <ProtectedRoute>
+            <Subjects />
+          </ProtectedRoute>
+        }
+      />
+      <Route
         path="/teachers"
         element={
           <ProtectedRoute>
@@ -152,6 +162,14 @@ function AppRoutes() {
         element={
           <ProtectedRoute>
             <Analytics />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/settings"
+        element={
+          <ProtectedRoute>
+            <Settings />
           </ProtectedRoute>
         }
       />
