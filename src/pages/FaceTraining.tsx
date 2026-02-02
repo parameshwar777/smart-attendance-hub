@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
+import { Progress } from "@/components/ui/progress";
 import {
   Select,
   SelectContent,
@@ -16,6 +17,7 @@ import {
 import { useToast } from "@/hooks/use-toast";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/contexts/AuthContext";
+import { useFaceApi } from "@/hooks/useFaceApi";
 import {
   Camera,
   CameraOff,
@@ -28,6 +30,9 @@ import {
   XCircle,
   ScanFace,
   GraduationCap,
+  Zap,
+  WifiOff,
+  RefreshCw,
 } from "lucide-react";
 
 interface CapturedImage {
@@ -42,14 +47,35 @@ interface TrainingSession {
   message?: string;
 }
 
+interface AssignedSection {
+  id: string;
+  name: string;
+  year: string;
+  yearNumber: number;
+  department: string;
+  departmentCode: string;
+  yearId: string;
+  departmentId: string;
+}
+
 export default function FaceTraining() {
   const { toast } = useToast();
   const { user } = useAuth();
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  
+  const {
+    isApiAvailable,
+    checkingApi,
+    trainStudent,
+    trainModel,
+    isTraining,
+    isTrainingModel,
+    modelStatus,
+    fetchModelStatus,
+  } = useFaceApi();
 
-  // Teacher's assigned subjects/sections
-  const [assignedSections, setAssignedSections] = useState<any[]>([]);
+  const [assignedSections, setAssignedSections] = useState<AssignedSection[]>([]);
   const [selectedSectionId, setSelectedSectionId] = useState<string>("");
 
   const [formData, setFormData] = useState({
@@ -73,6 +99,12 @@ export default function FaceTraining() {
   }, [user]);
 
   useEffect(() => {
+    if (selectedSectionId) {
+      fetchModelStatus(selectedSectionId);
+    }
+  }, [selectedSectionId, fetchModelStatus]);
+
+  useEffect(() => {
     return () => {
       if (stream) {
         stream.getTracks().forEach(track => track.stop());
@@ -82,7 +114,6 @@ export default function FaceTraining() {
 
   const fetchAssignedSections = async () => {
     try {
-      // Get subjects assigned to current teacher
       const { data: subjects, error } = await supabase
         .from("subjects")
         .select(`
@@ -109,8 +140,7 @@ export default function FaceTraining() {
 
       if (error) throw error;
 
-      // Extract unique sections
-      const sectionsMap = new Map();
+      const sectionsMap = new Map<string, AssignedSection>();
       (subjects || []).forEach(subject => {
         const section = subject.sections as any;
         if (!sectionsMap.has(section.id)) {
@@ -130,7 +160,6 @@ export default function FaceTraining() {
       const sections = Array.from(sectionsMap.values());
       setAssignedSections(sections);
 
-      // Auto-select first section if available
       if (sections.length > 0 && !selectedSectionId) {
         setSelectedSectionId(sections[0].id);
       }
@@ -193,7 +222,6 @@ export default function FaceTraining() {
 
       setCapturedImages(prev => [...prev, newImage]);
 
-      // Flash effect
       setIsCapturing(true);
       setTimeout(() => setIsCapturing(false), 150);
     }
@@ -230,7 +258,6 @@ export default function FaceTraining() {
 
     setIsSubmitting(true);
 
-    // Add to recent trainings with pending status
     const trainingSession: TrainingSession = {
       studentName: formData.fullName,
       rollNumber: formData.rollNumber,
@@ -244,12 +271,11 @@ export default function FaceTraining() {
         .from("students")
         .select("id")
         .eq("roll_number", formData.rollNumber)
-        .single();
+        .maybeSingle();
 
       let studentId: string;
 
       if (existingStudent) {
-        // Update existing student
         const { error: updateError } = await supabase
           .from("students")
           .update({
@@ -261,7 +287,6 @@ export default function FaceTraining() {
         if (updateError) throw updateError;
         studentId = existingStudent.id;
       } else {
-        // Create new student
         const { data: newStudent, error: insertError } = await supabase
           .from("students")
           .insert({
@@ -278,36 +303,44 @@ export default function FaceTraining() {
         studentId = newStudent.id;
       }
 
-      // TODO: Call backend API to process face images
-      // POST /api/face-training
-      // Body: { student_id, images: capturedImages.map(img => img.dataUrl) }
-      
-      // Simulate API call for now
-      await new Promise(resolve => setTimeout(resolve, 1500));
-
-      // Update training status to success
-      setRecentTrainings(prev =>
-        prev.map(t =>
-          t.rollNumber === formData.rollNumber
-            ? { ...t, status: "success" as const, message: "Face model trained successfully" }
-            : t
-        )
-      );
-
-      toast({
-        title: "Training Complete",
-        description: `${formData.fullName} has been trained successfully.`,
+      // Call backend API for face training
+      const result = await trainStudent({
+        student_id: studentId,
+        roll_number: formData.rollNumber,
+        images: capturedImages.map(img => img.dataUrl),
       });
 
-      // Reset form
-      setFormData({
-        fullName: "",
-        rollNumber: "",
-        email: "",
-      });
-      setCapturedImages([]);
+      if (result?.success) {
+        // Update face_registered status in database
+        await supabase
+          .from("students")
+          .update({ 
+            face_registered: true,
+            face_embedding_id: result.face_embedding_id,
+          })
+          .eq("id", studentId);
+
+        setRecentTrainings(prev =>
+          prev.map(t =>
+            t.rollNumber === formData.rollNumber
+              ? { ...t, status: "success" as const, message: result.message }
+              : t
+          )
+        );
+
+        // Reset form
+        setFormData({ fullName: "", rollNumber: "", email: "" });
+        setCapturedImages([]);
+      } else {
+        setRecentTrainings(prev =>
+          prev.map(t =>
+            t.rollNumber === formData.rollNumber
+              ? { ...t, status: "failed" as const, message: result?.error || "Training failed" }
+              : t
+          )
+        );
+      }
     } catch (error: any) {
-      // Update training status to failed
       setRecentTrainings(prev =>
         prev.map(t =>
           t.rollNumber === formData.rollNumber
@@ -326,6 +359,11 @@ export default function FaceTraining() {
     }
   };
 
+  const handleTrainModel = async () => {
+    if (!selectedSectionId) return;
+    await trainModel(selectedSectionId);
+  };
+
   const selectedSection = assignedSections.find(s => s.id === selectedSectionId);
 
   return (
@@ -336,14 +374,36 @@ export default function FaceTraining() {
         className="space-y-6"
       >
         {/* Header */}
-        <div>
-          <h1 className="text-3xl font-display font-bold flex items-center gap-3">
-            <ScanFace className="h-8 w-8 text-primary" />
-            Face Training
-          </h1>
-          <p className="text-muted-foreground">
-            Capture student faces and train the recognition model
-          </p>
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+          <div>
+            <h1 className="text-3xl font-display font-bold flex items-center gap-3">
+              <ScanFace className="h-8 w-8 text-primary" />
+              Face Training
+            </h1>
+            <p className="text-muted-foreground">
+              Capture student faces and train the recognition model
+            </p>
+          </div>
+          
+          {/* API Status Indicator */}
+          <div className="flex items-center gap-2">
+            {checkingApi ? (
+              <Badge variant="secondary" className="gap-1">
+                <Loader2 className="h-3 w-3 animate-spin" />
+                Checking API...
+              </Badge>
+            ) : isApiAvailable ? (
+              <Badge variant="default" className="gap-1 bg-green-600">
+                <CheckCircle className="h-3 w-3" />
+                Backend Connected
+              </Badge>
+            ) : (
+              <Badge variant="destructive" className="gap-1">
+                <WifiOff className="h-3 w-3" />
+                Backend Offline
+              </Badge>
+            )}
+          </div>
         </div>
 
         {assignedSections.length === 0 ? (
@@ -368,7 +428,7 @@ export default function FaceTraining() {
                     Students will be registered to the selected section
                   </CardDescription>
                 </CardHeader>
-                <CardContent>
+                <CardContent className="space-y-4">
                   <Select
                     value={selectedSectionId}
                     onValueChange={setSelectedSectionId}
@@ -386,7 +446,7 @@ export default function FaceTraining() {
                   </Select>
 
                   {selectedSection && (
-                    <div className="mt-4 p-3 bg-muted rounded-lg">
+                    <div className="p-3 bg-muted rounded-lg">
                       <div className="grid grid-cols-2 gap-2 text-sm">
                         <div>
                           <span className="text-muted-foreground">Department:</span>
@@ -403,6 +463,44 @@ export default function FaceTraining() {
                       </div>
                     </div>
                   )}
+
+                  {/* Model Status & Train Button */}
+                  {modelStatus && (
+                    <div className="p-3 bg-secondary/50 rounded-lg space-y-3">
+                      <div className="flex items-center justify-between">
+                        <span className="text-sm font-medium">Model Status</span>
+                        <Badge variant={modelStatus.is_trained ? "default" : "secondary"}>
+                          {modelStatus.is_trained ? "Trained" : "Not Trained"}
+                        </Badge>
+                      </div>
+                      <div className="text-sm text-muted-foreground">
+                        {modelStatus.trained_students_count} / {modelStatus.students_count} students trained
+                      </div>
+                      <Progress 
+                        value={(modelStatus.trained_students_count / Math.max(modelStatus.students_count, 1)) * 100} 
+                        className="h-2"
+                      />
+                      {modelStatus.last_trained_at && (
+                        <p className="text-xs text-muted-foreground">
+                          Last trained: {new Date(modelStatus.last_trained_at).toLocaleString()}
+                        </p>
+                      )}
+                    </div>
+                  )}
+
+                  <Button
+                    onClick={handleTrainModel}
+                    disabled={!selectedSectionId || isTrainingModel || !isApiAvailable}
+                    variant="outline"
+                    className="w-full gap-2"
+                  >
+                    {isTrainingModel ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <Zap className="h-4 w-4" />
+                    )}
+                    {isTrainingModel ? "Training Model..." : "Train Section Model"}
+                  </Button>
                 </CardContent>
               </Card>
 
@@ -458,7 +556,7 @@ export default function FaceTraining() {
                     <Button
                       type="submit"
                       className="w-full gap-2"
-                      disabled={isSubmitting || capturedImages.length < 5}
+                      disabled={isSubmitting || capturedImages.length < 5 || !isApiAvailable}
                     >
                       {isSubmitting ? (
                         <Loader2 className="h-4 w-4 animate-spin" />
@@ -499,47 +597,36 @@ export default function FaceTraining() {
                         <AnimatePresence>
                           {isCapturing && (
                             <motion.div
-                              initial={{ opacity: 0 }}
-                              animate={{ opacity: 1 }}
+                              initial={{ opacity: 1 }}
+                              animate={{ opacity: 0 }}
                               exit={{ opacity: 0 }}
                               className="absolute inset-0 bg-white"
                             />
                           )}
                         </AnimatePresence>
-                        {/* Single face guide overlay */}
-                        <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-                          <div className="w-48 h-48 border-4 border-accent border-dashed rounded-full opacity-50" />
-                        </div>
-                        <Badge className="absolute top-3 left-3 bg-background/80">
-                          Single Face Only
-                        </Badge>
                       </>
                     ) : (
                       <div className="absolute inset-0 flex flex-col items-center justify-center text-muted-foreground">
-                        <CameraOff className="h-12 w-12 mb-3 opacity-50" />
-                        <p>Camera is off</p>
+                        <CameraOff className="h-16 w-16 mb-4 opacity-50" />
+                        <p className="text-lg">Camera is off</p>
+                        <p className="text-sm">Click "Start Camera" to begin</p>
                       </div>
                     )}
                   </div>
 
-                  {/* Hidden canvas */}
+                  {/* Hidden canvas for capture */}
                   <canvas ref={canvasRef} className="hidden" />
 
                   {/* Camera Controls */}
                   <div className="flex gap-2">
                     {!isCameraActive ? (
-                      <Button
-                        type="button"
-                        onClick={startCamera}
-                        className="flex-1 gap-2"
-                      >
+                      <Button onClick={startCamera} className="flex-1 gap-2">
                         <Camera className="h-4 w-4" />
                         Start Camera
                       </Button>
                     ) : (
                       <>
                         <Button
-                          type="button"
                           onClick={captureImage}
                           className="flex-1 gap-2"
                           disabled={capturedImages.length >= 10}
@@ -547,11 +634,7 @@ export default function FaceTraining() {
                           <Camera className="h-4 w-4" />
                           Capture ({capturedImages.length}/10)
                         </Button>
-                        <Button
-                          type="button"
-                          variant="outline"
-                          onClick={stopCamera}
-                        >
+                        <Button variant="destructive" onClick={stopCamera}>
                           <CameraOff className="h-4 w-4" />
                         </Button>
                       </>
@@ -562,11 +645,10 @@ export default function FaceTraining() {
                   {capturedImages.length > 0 && (
                     <div className="space-y-3">
                       <div className="flex items-center justify-between">
-                        <p className="text-sm font-medium">
+                        <span className="text-sm font-medium">
                           Captured Images ({capturedImages.length})
-                        </p>
+                        </span>
                         <Button
-                          type="button"
                           variant="ghost"
                           size="sm"
                           onClick={clearAllImages}
@@ -578,78 +660,59 @@ export default function FaceTraining() {
                       </div>
                       <div className="grid grid-cols-5 gap-2">
                         {capturedImages.map((img) => (
-                          <motion.div
-                            key={img.id}
-                            initial={{ scale: 0 }}
-                            animate={{ scale: 1 }}
-                            className="relative aspect-square group"
-                          >
+                          <div key={img.id} className="relative group">
                             <img
                               src={img.dataUrl}
                               alt="Captured face"
-                              className="w-full h-full object-cover rounded-lg"
+                              className="w-full aspect-square object-cover rounded-lg"
                             />
                             <button
-                              type="button"
                               onClick={() => removeImage(img.id)}
-                              className="absolute inset-0 bg-black/50 opacity-0 group-hover:opacity-100 transition-opacity rounded-lg flex items-center justify-center"
+                              className="absolute -top-1 -right-1 h-5 w-5 bg-destructive text-destructive-foreground rounded-full opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center"
                             >
-                              <Trash2 className="h-4 w-4 text-white" />
+                              <XCircle className="h-4 w-4" />
                             </button>
-                          </motion.div>
+                          </div>
                         ))}
                       </div>
                     </div>
                   )}
-
-                  {/* Requirements */}
-                  <div className="p-3 bg-muted rounded-lg">
-                    <div className="flex items-start gap-2 text-sm">
-                      <AlertCircle className="h-4 w-4 text-muted-foreground mt-0.5" />
-                      <div className="space-y-1 text-muted-foreground">
-                        <p>• Only ONE student should be in frame</p>
-                        <p>• Capture at least 5 clear face images</p>
-                        <p>• Ensure good lighting and visibility</p>
-                        <p>• Capture from slightly different angles</p>
-                      </div>
-                    </div>
-                  </div>
                 </CardContent>
               </Card>
 
-              {/* Recent Trainings */}
+              {/* Recent Training Sessions */}
               {recentTrainings.length > 0 && (
                 <Card>
                   <CardHeader>
-                    <CardTitle className="text-lg">Recent Training Sessions</CardTitle>
+                    <CardTitle className="text-lg">Recent Training</CardTitle>
                   </CardHeader>
                   <CardContent>
                     <div className="space-y-2">
-                      {recentTrainings.slice(0, 5).map((session, index) => (
+                      {recentTrainings.slice(0, 5).map((training, idx) => (
                         <div
-                          key={`${session.rollNumber}-${index}`}
-                          className="flex items-center justify-between p-3 bg-muted rounded-lg"
+                          key={idx}
+                          className="flex items-center justify-between p-3 bg-secondary/50 rounded-lg"
                         >
                           <div>
-                            <p className="font-medium">{session.studentName}</p>
+                            <p className="font-medium">{training.studentName}</p>
                             <p className="text-sm text-muted-foreground">
-                              {session.rollNumber}
+                              {training.rollNumber}
                             </p>
                           </div>
                           <div className="flex items-center gap-2">
-                            {session.status === "training" && (
+                            {training.status === "training" && (
                               <Badge variant="secondary" className="gap-1">
                                 <Loader2 className="h-3 w-3 animate-spin" />
                                 Training...
                               </Badge>
                             )}
-                            {session.status === "success" && (
-                              <Badge className="gap-1 bg-green-600">
+                            {training.status === "success" && (
+                              <Badge variant="default" className="gap-1 bg-green-600">
                                 <CheckCircle className="h-3 w-3" />
                                 Success
                               </Badge>
                             )}
-                            {session.status === "failed" && (
+                            {training.status === "failed" && (
                               <Badge variant="destructive" className="gap-1">
                                 <XCircle className="h-3 w-3" />
                                 Failed
