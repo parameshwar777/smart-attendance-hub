@@ -1,26 +1,28 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { DashboardLayout } from "@/components/layout/DashboardLayout";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { useToast } from "@/hooks/use-toast";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/contexts/AuthContext";
+import { useFaceApi } from "@/hooks/useFaceApi";
 import {
   Camera,
   CameraOff,
   Play,
   Square,
   Users,
-  Check,
   X,
-  RefreshCw,
   Loader2,
-  AlertCircle,
   CheckCircle2,
   Clock,
+  WifiOff,
+  Save,
+  RefreshCw,
 } from "lucide-react";
 
 interface DetectedStudent {
@@ -29,12 +31,14 @@ interface DetectedStudent {
   fullName: string;
   confidence: number;
   status: "present" | "absent" | "late";
+  isManual?: boolean;
 }
 
 interface ClassInfo {
   id: string;
   subject_name: string;
   subject_code: string;
+  section_id: string;
   start_time: string;
   end_time: string;
   status: string;
@@ -44,6 +48,14 @@ export default function TakeAttendance() {
   const { user } = useAuth();
   const { toast } = useToast();
   const videoRef = useRef<HTMLVideoElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  
+  const {
+    isApiAvailable,
+    checkingApi,
+    recognize,
+    isRecognizing: apiRecognizing,
+  } = useFaceApi();
   
   const [selectedClass, setSelectedClass] = useState<string>("");
   const [todaysClasses, setTodaysClasses] = useState<ClassInfo[]>([]);
@@ -53,6 +65,7 @@ export default function TakeAttendance() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [stream, setStream] = useState<MediaStream | null>(null);
   const [allStudents, setAllStudents] = useState<any[]>([]);
+  const [recognitionInterval, setRecognitionIntervalId] = useState<NodeJS.Timeout | null>(null);
 
   useEffect(() => {
     fetchTodaysClasses();
@@ -63,8 +76,11 @@ export default function TakeAttendance() {
       if (stream) {
         stream.getTracks().forEach(track => track.stop());
       }
+      if (recognitionInterval) {
+        clearInterval(recognitionInterval);
+      }
     };
-  }, [stream]);
+  }, [stream, recognitionInterval]);
 
   const fetchTodaysClasses = async () => {
     const today = new Date().toISOString().split("T")[0];
@@ -90,6 +106,7 @@ export default function TakeAttendance() {
         id: cls.id,
         subject_name: cls.subjects?.name || "Unknown",
         subject_code: cls.subjects?.code || "",
+        section_id: cls.subjects?.section_id || "",
         start_time: cls.start_time,
         end_time: cls.end_time,
         status: cls.status,
@@ -102,7 +119,6 @@ export default function TakeAttendance() {
     const selectedClassInfo = todaysClasses.find(c => c.id === classId);
     if (!selectedClassInfo) return;
 
-    // Get the section from the subject
     const { data: classData } = await supabase
       .from("classes")
       .select(`
@@ -149,42 +165,93 @@ export default function TakeAttendance() {
     if (videoRef.current) {
       videoRef.current.srcObject = null;
     }
+    if (recognitionInterval) {
+      clearInterval(recognitionInterval);
+      setRecognitionIntervalId(null);
+    }
     setStream(null);
     setIsCameraActive(false);
     setIsRecognizing(false);
   };
 
-  const startRecognition = async () => {
+  const captureFrame = useCallback((): string | null => {
+    if (!videoRef.current || !canvasRef.current) return null;
+
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+    const context = canvas.getContext("2d");
+
+    if (context) {
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      context.drawImage(video, 0, 0);
+      return canvas.toDataURL("image/jpeg", 0.8);
+    }
+    return null;
+  }, []);
+
+  const performRecognition = useCallback(async () => {
+    const selectedClassInfo = todaysClasses.find(c => c.id === selectedClass);
+    if (!selectedClassInfo) return;
+
+    const frameData = captureFrame();
+    if (!frameData) return;
+
+    const result = await recognize({
+      class_id: selectedClass,
+      section_id: selectedClassInfo.section_id,
+      image: frameData,
+      timestamp: new Date().toISOString(),
+    });
+
+    if (result?.success && result.recognized.length > 0) {
+      // Add newly recognized students (avoid duplicates)
+      setDetectedStudents(prev => {
+        const newStudents = [...prev];
+        for (const face of result.recognized) {
+          if (!newStudents.find(s => s.id === face.student_id)) {
+            newStudents.push({
+              id: face.student_id,
+              rollNumber: face.roll_number,
+              fullName: face.student_name,
+              confidence: face.confidence,
+              status: "present",
+            });
+          }
+        }
+        return newStudents;
+      });
+
+      if (result.recognized.length > 0) {
+        toast({
+          title: "Faces Recognized",
+          description: `${result.recognized.length} new student(s) detected`,
+        });
+      }
+    }
+  }, [selectedClass, todaysClasses, captureFrame, recognize, toast]);
+
+  const startRecognition = () => {
     setIsRecognizing(true);
     
-    // TODO: This would call the backend AI API for face recognition
-    // For now, simulate detection with mock data
     toast({
       title: "Recognition Started",
       description: "AI is analyzing the camera feed for faces...",
     });
 
-    // Simulate face detection after 2 seconds
-    setTimeout(() => {
-      // Mock detected students
-      const mockDetected: DetectedStudent[] = allStudents.slice(0, 3).map((student, i) => ({
-        id: student.id,
-        rollNumber: student.roll_number,
-        fullName: student.full_name,
-        confidence: 0.95 - i * 0.05,
-        status: i === 2 ? "late" : "present" as "present" | "late",
-      }));
-
-      setDetectedStudents(mockDetected);
-      
-      toast({
-        title: "Faces Detected",
-        description: `${mockDetected.length} student(s) recognized`,
-      });
-    }, 2000);
+    // Perform recognition every 2 seconds
+    const intervalId = setInterval(performRecognition, 2000);
+    setRecognitionIntervalId(intervalId);
+    
+    // Do an immediate recognition
+    performRecognition();
   };
 
   const stopRecognition = () => {
+    if (recognitionInterval) {
+      clearInterval(recognitionInterval);
+      setRecognitionIntervalId(null);
+    }
     setIsRecognizing(false);
     toast({
       title: "Recognition Stopped",
@@ -209,6 +276,7 @@ export default function TakeAttendance() {
         fullName: student.full_name,
         confidence: 1.0,
         status: "present" as const,
+        isManual: true,
       },
     ]);
   };
@@ -236,7 +304,8 @@ export default function TakeAttendance() {
         student_id: student.id,
         status: student.status,
         marked_by: user?.id,
-        face_confidence: student.confidence,
+        face_confidence: student.isManual ? null : student.confidence,
+        is_manual_override: student.isManual || false,
       }));
 
       // Also mark absent students
@@ -284,6 +353,8 @@ export default function TakeAttendance() {
     }
   };
 
+  const selectedClassInfo = todaysClasses.find(c => c.id === selectedClass);
+
   return (
     <DashboardLayout>
       <motion.div
@@ -291,11 +362,33 @@ export default function TakeAttendance() {
         animate={{ opacity: 1, y: 0 }}
         className="space-y-6"
       >
-        <div>
-          <h1 className="text-3xl font-display font-bold">Take Attendance</h1>
-          <p className="text-muted-foreground">
-            Use AI-powered face recognition to mark attendance automatically
-          </p>
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+          <div>
+            <h1 className="text-3xl font-display font-bold">Take Attendance</h1>
+            <p className="text-muted-foreground">
+              Use AI-powered face recognition to mark attendance automatically
+            </p>
+          </div>
+          
+          {/* API Status */}
+          <div className="flex items-center gap-2">
+            {checkingApi ? (
+              <Badge variant="secondary" className="gap-1">
+                <Loader2 className="h-3 w-3 animate-spin" />
+                Checking API...
+              </Badge>
+            ) : isApiAvailable ? (
+              <Badge variant="default" className="gap-1 bg-green-600">
+                <CheckCircle2 className="h-3 w-3" />
+                Backend Connected
+              </Badge>
+            ) : (
+              <Badge variant="destructive" className="gap-1">
+                <WifiOff className="h-3 w-3" />
+                Backend Offline
+              </Badge>
+            )}
+          </div>
         </div>
 
         <div className="grid gap-6 lg:grid-cols-3">
@@ -344,6 +437,7 @@ export default function TakeAttendance() {
                       todaysClasses.map((cls) => (
                         <SelectItem key={cls.id} value={cls.id}>
                           {cls.subject_name} ({cls.subject_code}) - {cls.start_time} to {cls.end_time}
+                          {cls.status === "completed" && " ✓"}
                         </SelectItem>
                       ))
                     )}
@@ -361,10 +455,17 @@ export default function TakeAttendance() {
                         muted
                         className="w-full h-full object-cover"
                       />
-                      {/* Face detection overlay */}
-                      <div className="absolute inset-0 pointer-events-none">
-                        {/* This would show bounding boxes for detected faces */}
-                      </div>
+                      {/* Recognition overlay */}
+                      {isRecognizing && (
+                        <div className="absolute inset-0 border-4 border-accent/50 rounded-lg pointer-events-none">
+                          <div className="absolute top-2 right-2">
+                            <Badge className="bg-accent text-accent-foreground gap-1">
+                              <RefreshCw className="h-3 w-3 animate-spin" />
+                              Scanning...
+                            </Badge>
+                          </div>
+                        </div>
+                      )}
                     </>
                   ) : (
                     <div className="absolute inset-0 flex flex-col items-center justify-center text-muted-foreground">
@@ -374,6 +475,9 @@ export default function TakeAttendance() {
                     </div>
                   )}
                 </div>
+
+                {/* Hidden canvas for frame capture */}
+                <canvas ref={canvasRef} className="hidden" />
 
                 {/* Controls */}
                 <div className="flex gap-2">
@@ -392,6 +496,7 @@ export default function TakeAttendance() {
                         <Button
                           onClick={startRecognition}
                           className="flex-1 gap-2 bg-accent hover:bg-accent/90"
+                          disabled={!isApiAvailable}
                         >
                           <Play className="h-4 w-4" />
                           Start Recognition
@@ -415,6 +520,22 @@ export default function TakeAttendance() {
                     </>
                   )}
                 </div>
+
+                {/* Submit Button */}
+                {detectedStudents.length > 0 && (
+                  <Button
+                    onClick={submitAttendance}
+                    className="w-full gap-2"
+                    disabled={isSubmitting}
+                  >
+                    {isSubmitting ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <Save className="h-4 w-4" />
+                    )}
+                    Submit Attendance ({detectedStudents.filter(s => s.status === "present" || s.status === "late").length} Present)
+                  </Button>
+                )}
               </CardContent>
             </Card>
           </div>
@@ -438,7 +559,7 @@ export default function TakeAttendance() {
                   <p className="text-sm">Start recognition to detect faces</p>
                 </div>
               ) : (
-                <div className="space-y-3">
+                <div className="space-y-3 max-h-[400px] overflow-y-auto">
                   <AnimatePresence>
                     {detectedStudents.map((student) => (
                       <motion.div
@@ -452,9 +573,13 @@ export default function TakeAttendance() {
                           <p className="font-medium truncate">{student.fullName}</p>
                           <div className="flex items-center gap-2 text-sm text-muted-foreground">
                             <span>{student.rollNumber}</span>
-                            <span className="text-xs">
-                              ({Math.round(student.confidence * 100)}% match)
-                            </span>
+                            {student.isManual ? (
+                              <span className="text-xs">(Manual)</span>
+                            ) : (
+                              <span className="text-xs">
+                                ({Math.round(student.confidence * 100)}% match)
+                              </span>
+                            )}
                           </div>
                         </div>
                         <div className="flex items-center gap-2">
@@ -499,35 +624,38 @@ export default function TakeAttendance() {
                         <button
                           key={student.id}
                           onClick={() => addManualStudent(student)}
-                          className="w-full flex items-center justify-between p-2 text-sm rounded-lg hover:bg-secondary transition-colors"
+                          className="w-full text-left px-3 py-2 rounded hover:bg-secondary transition-colors text-sm"
                         >
-                          <span>{student.full_name}</span>
-                          <span className="text-muted-foreground">{student.roll_number}</span>
+                          <span className="font-medium">{student.full_name}</span>
+                          <span className="text-muted-foreground ml-2">
+                            {student.roll_number}
+                          </span>
                         </button>
                       ))}
                   </div>
                 </div>
               )}
 
-              {/* Submit Button */}
+              {/* Summary */}
               {detectedStudents.length > 0 && (
-                <Button
-                  onClick={submitAttendance}
-                  className="w-full gap-2"
-                  disabled={isSubmitting}
-                >
-                  {isSubmitting ? (
-                    <>
-                      <Loader2 className="h-4 w-4 animate-spin" />
-                      Submitting...
-                    </>
-                  ) : (
-                    <>
-                      <Check className="h-4 w-4" />
-                      Submit Attendance
-                    </>
-                  )}
-                </Button>
+                <div className="border-t pt-4 space-y-2">
+                  <div className="flex justify-between text-sm">
+                    <span>Present:</span>
+                    <span className="font-medium text-green-600">
+                      {detectedStudents.filter(s => s.status === "present").length}
+                    </span>
+                  </div>
+                  <div className="flex justify-between text-sm">
+                    <span>Late:</span>
+                    <span className="font-medium text-yellow-600">
+                      {detectedStudents.filter(s => s.status === "late").length}
+                    </span>
+                  </div>
+                  <div className="flex justify-between text-sm">
+                    <span>Total Students:</span>
+                    <span className="font-medium">{allStudents.length}</span>
+                  </div>
+                </div>
               )}
             </CardContent>
           </Card>

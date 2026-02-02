@@ -3,8 +3,6 @@ import { motion } from "framer-motion";
 import { DashboardLayout } from "@/components/layout/DashboardLayout";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import {
@@ -22,15 +20,10 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import {
-  Tabs,
-  TabsContent,
-  TabsList,
-  TabsTrigger,
-} from "@/components/ui/tabs";
 import { useToast } from "@/hooks/use-toast";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/contexts/AuthContext";
+import { useFaceApi } from "@/hooks/useFaceApi";
 import {
   Upload,
   FileSpreadsheet,
@@ -43,6 +36,8 @@ import {
   Trash2,
   Play,
   GraduationCap,
+  Zap,
+  WifiOff,
 } from "lucide-react";
 
 interface ParsedStudent {
@@ -63,13 +58,33 @@ interface UploadedImage {
   dataUrl: string;
 }
 
+interface AssignedSection {
+  id: string;
+  name: string;
+  year: string;
+  yearNumber: number;
+  department: string;
+  departmentCode: string;
+}
+
 export default function BulkUpload() {
   const { toast } = useToast();
   const { user } = useAuth();
   const csvInputRef = useRef<HTMLInputElement>(null);
   const zipInputRef = useRef<HTMLInputElement>(null);
 
-  const [assignedSections, setAssignedSections] = useState<any[]>([]);
+  const {
+    isApiAvailable,
+    checkingApi,
+    trainBulk,
+    trainModel,
+    isTraining,
+    isTrainingModel,
+    modelStatus,
+    fetchModelStatus,
+  } = useFaceApi();
+
+  const [assignedSections, setAssignedSections] = useState<AssignedSection[]>([]);
   const [selectedSectionId, setSelectedSectionId] = useState<string>("");
 
   const [csvFile, setCsvFile] = useState<File | null>(null);
@@ -78,7 +93,7 @@ export default function BulkUpload() {
   const [uploadedImages, setUploadedImages] = useState<UploadedImage[]>([]);
 
   const [isProcessing, setIsProcessing] = useState(false);
-  const [isTraining, setIsTraining] = useState(false);
+  const [isUploading, setIsUploading] = useState(false);
   const [trainingProgress, setTrainingProgress] = useState(0);
   const [currentTrainingStudent, setCurrentTrainingStudent] = useState<string | null>(null);
 
@@ -87,6 +102,12 @@ export default function BulkUpload() {
       fetchAssignedSections();
     }
   }, [user]);
+
+  useEffect(() => {
+    if (selectedSectionId) {
+      fetchModelStatus(selectedSectionId);
+    }
+  }, [selectedSectionId, fetchModelStatus]);
 
   const fetchAssignedSections = async () => {
     try {
@@ -116,7 +137,7 @@ export default function BulkUpload() {
 
       if (error) throw error;
 
-      const sectionsMap = new Map();
+      const sectionsMap = new Map<string, AssignedSection>();
       (subjects || []).forEach(subject => {
         const section = subject.sections as any;
         if (!sectionsMap.has(section.id)) {
@@ -163,7 +184,6 @@ export default function BulkUpload() {
       for (let i = 1; i < lines.length; i++) {
         const values = lines[i].split(",").map(v => v.trim());
         
-        // Map CSV columns
         const serialNoIdx = headers.findIndex(h => h.includes("s.no") || h.includes("serial"));
         const rollNoIdx = headers.findIndex(h => h.includes("roll"));
         const nameIdx = headers.findIndex(h => h.includes("name") && h.includes("student"));
@@ -184,7 +204,6 @@ export default function BulkUpload() {
         }
       }
 
-      // Check if images exist for each student
       const updatedStudents = students.map(student => ({
         ...student,
         hasImage: uploadedImages.some(img => img.serialNo === student.serialNo),
@@ -218,7 +237,6 @@ export default function BulkUpload() {
     setIsProcessing(true);
 
     try {
-      // Dynamic import JSZip
       const JSZipModule = await import("jszip");
       const JSZip = JSZipModule.default;
       const zip = await JSZip.loadAsync(file);
@@ -229,7 +247,6 @@ export default function BulkUpload() {
       for (const fileName of fileNames) {
         const zipEntry = zip.files[fileName];
         if (!zipEntry.dir && /\.(jpg|jpeg|png|webp)$/i.test(fileName)) {
-          // Extract serial number from filename (e.g., "1.jpg", "001.png")
           const match = fileName.match(/(\d+)\.(jpg|jpeg|png|webp)$/i);
           if (match) {
             const serialNo = parseInt(match[1]);
@@ -251,7 +268,6 @@ export default function BulkUpload() {
 
       setUploadedImages(images);
 
-      // Update parsed students with image availability
       if (parsedStudents.length > 0) {
         const updatedStudents = parsedStudents.map(student => ({
           ...student,
@@ -298,89 +314,116 @@ export default function BulkUpload() {
       return;
     }
 
-    setIsTraining(true);
+    setIsUploading(true);
     setTrainingProgress(0);
 
-    for (let i = 0; i < studentsToTrain.length; i++) {
-      const student = studentsToTrain[i];
-      setCurrentTrainingStudent(student.studentName);
+    try {
+      // First, create/update all students in the database
+      for (let i = 0; i < studentsToTrain.length; i++) {
+        const student = studentsToTrain[i];
+        setCurrentTrainingStudent(student.studentName);
 
-      // Update status to uploading
-      setParsedStudents(prev =>
-        prev.map(s =>
-          s.serialNo === student.serialNo ? { ...s, status: "uploading" as const } : s
-        )
-      );
+        setParsedStudents(prev =>
+          prev.map(s =>
+            s.serialNo === student.serialNo ? { ...s, status: "uploading" as const } : s
+          )
+        );
 
-      try {
-        // Check if student exists
-        const { data: existingStudent } = await supabase
-          .from("students")
-          .select("id")
-          .eq("roll_number", student.rollNumber)
-          .single();
-
-        let studentId: string;
-
-        if (existingStudent) {
-          studentId = existingStudent.id;
-        } else {
-          // Create new student
-          const { data: newStudent, error } = await supabase
+        try {
+          const { data: existingStudent } = await supabase
             .from("students")
-            .insert({
-              full_name: student.studentName,
-              roll_number: student.rollNumber,
-              section_id: selectedSectionId,
-              face_registered: false,
-            })
-            .select()
-            .single();
+            .select("id")
+            .eq("roll_number", student.rollNumber)
+            .maybeSingle();
 
-          if (error) throw error;
-          studentId = newStudent.id;
+          if (!existingStudent) {
+            await supabase
+              .from("students")
+              .insert({
+                full_name: student.studentName,
+                roll_number: student.rollNumber,
+                section_id: selectedSectionId,
+                face_registered: false,
+              });
+          }
+        } catch (error: any) {
+          console.error("Error creating student:", error);
         }
 
-        // Get the image for this student
-        const studentImage = uploadedImages.find(img => img.serialNo === student.serialNo);
-
-        // TODO: Call backend API for face training
-        // POST /api/face-training
-        // Body: { student_id: studentId, images: [studentImage?.dataUrl] }
-        
-        // Simulate training
-        await new Promise(resolve => setTimeout(resolve, 500));
-
-        // Update status to success
-        setParsedStudents(prev =>
-          prev.map(s =>
-            s.serialNo === student.serialNo
-              ? { ...s, status: "success" as const, message: "Trained successfully" }
-              : s
-          )
-        );
-      } catch (error: any) {
-        // Update status to failed
-        setParsedStudents(prev =>
-          prev.map(s =>
-            s.serialNo === student.serialNo
-              ? { ...s, status: "failed" as const, message: error.message }
-              : s
-          )
-        );
+        setTrainingProgress(((i + 1) / studentsToTrain.length) * 50);
       }
 
-      setTrainingProgress(((i + 1) / studentsToTrain.length) * 100);
+      // Now call the bulk training API
+      const imagesMap: Record<string, string> = {};
+      studentsToTrain.forEach(student => {
+        const image = uploadedImages.find(img => img.serialNo === student.serialNo);
+        if (image) {
+          imagesMap[student.serialNo.toString()] = image.dataUrl;
+        }
+      });
+
+      const result = await trainBulk({
+        section_id: selectedSectionId,
+        students: studentsToTrain.map(s => ({
+          serial_no: s.serialNo,
+          roll_number: s.rollNumber,
+          student_name: s.studentName,
+          branch: s.branch,
+          semester: s.semester,
+          gender: s.gender,
+        })),
+        images: imagesMap,
+      });
+
+      // Update statuses based on API response
+      if (result) {
+        for (const res of result.results) {
+          setParsedStudents(prev =>
+            prev.map(s =>
+              s.serialNo === res.serial_no
+                ? { 
+                    ...s, 
+                    status: res.status as "success" | "failed", 
+                    message: res.message || res.error 
+                  }
+                : s
+            )
+          );
+
+          // Update face_registered in database for successful ones
+          if (res.status === "success" && res.student_id) {
+            await supabase
+              .from("students")
+              .update({ 
+                face_registered: true,
+                face_embedding_id: res.face_embedding_id,
+              })
+              .eq("id", res.student_id);
+          }
+        }
+      }
+
+      setTrainingProgress(100);
+
+      toast({
+        title: "Bulk Training Complete",
+        description: `Successfully processed ${result?.trained || 0} students.`,
+      });
+    } catch (error: any) {
+      toast({
+        title: "Training Error",
+        description: error.message || "Failed to complete bulk training.",
+        variant: "destructive",
+      });
+    } finally {
+      setIsUploading(false);
+      setCurrentTrainingStudent(null);
     }
+  };
 
-    setIsTraining(false);
-    setCurrentTrainingStudent(null);
-
-    const successCount = parsedStudents.filter(s => s.status === "success").length;
-    toast({
-      title: "Bulk Training Complete",
-      description: `Successfully trained ${successCount} students.`,
-    });
+  const handleTrainModel = async () => {
+    if (!selectedSectionId) return;
+    await trainModel(selectedSectionId);
   };
 
   const clearAll = () => {
@@ -422,14 +465,36 @@ export default function BulkUpload() {
         className="space-y-6"
       >
         {/* Header */}
-        <div>
-          <h1 className="text-3xl font-display font-bold flex items-center gap-3">
-            <Upload className="h-8 w-8 text-primary" />
-            Bulk Upload & Training
-          </h1>
-          <p className="text-muted-foreground">
-            Upload CSV with student data and ZIP with face images for bulk training
-          </p>
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+          <div>
+            <h1 className="text-3xl font-display font-bold flex items-center gap-3">
+              <Upload className="h-8 w-8 text-primary" />
+              Bulk Upload & Training
+            </h1>
+            <p className="text-muted-foreground">
+              Upload CSV with student data and ZIP with face images for bulk training
+            </p>
+          </div>
+          
+          {/* API Status */}
+          <div className="flex items-center gap-2">
+            {checkingApi ? (
+              <Badge variant="secondary" className="gap-1">
+                <Loader2 className="h-3 w-3 animate-spin" />
+                Checking API...
+              </Badge>
+            ) : isApiAvailable ? (
+              <Badge variant="default" className="gap-1 bg-green-600">
+                <CheckCircle className="h-3 w-3" />
+                Backend Connected
+              </Badge>
+            ) : (
+              <Badge variant="destructive" className="gap-1">
+                <WifiOff className="h-3 w-3" />
+                Backend Offline
+              </Badge>
+            )}
+          </div>
         </div>
 
         {assignedSections.length === 0 ? (
@@ -452,7 +517,7 @@ export default function BulkUpload() {
                   All students will be registered to this section
                 </CardDescription>
               </CardHeader>
-              <CardContent>
+              <CardContent className="space-y-4">
                 <Select
                   value={selectedSectionId}
                   onValueChange={setSelectedSectionId}
@@ -468,6 +533,39 @@ export default function BulkUpload() {
                     ))}
                   </SelectContent>
                 </Select>
+
+                {/* Model Status & Train Button */}
+                {modelStatus && (
+                  <div className="p-3 bg-secondary/50 rounded-lg space-y-3 max-w-md">
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm font-medium">Model Status</span>
+                      <Badge variant={modelStatus.is_trained ? "default" : "secondary"}>
+                        {modelStatus.is_trained ? "Trained" : "Not Trained"}
+                      </Badge>
+                    </div>
+                    <div className="text-sm text-muted-foreground">
+                      {modelStatus.trained_students_count} / {modelStatus.students_count} students trained
+                    </div>
+                    <Progress 
+                      value={(modelStatus.trained_students_count / Math.max(modelStatus.students_count, 1)) * 100} 
+                      className="h-2"
+                    />
+                  </div>
+                )}
+
+                <Button
+                  onClick={handleTrainModel}
+                  disabled={!selectedSectionId || isTrainingModel || !isApiAvailable}
+                  variant="outline"
+                  className="gap-2"
+                >
+                  {isTrainingModel ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <Zap className="h-4 w-4" />
+                  )}
+                  {isTrainingModel ? "Training Model..." : "Train Section Model"}
+                </Button>
               </CardContent>
             </Card>
 
@@ -499,12 +597,12 @@ export default function BulkUpload() {
                       className="cursor-pointer flex flex-col items-center gap-2"
                     >
                       <FileSpreadsheet className="h-10 w-10 text-muted-foreground" />
-                      <p className="text-sm font-medium">
+                      <span className="text-sm font-medium">
                         {csvFile ? csvFile.name : "Click to upload CSV"}
-                      </p>
-                      <p className="text-xs text-muted-foreground">
-                        CSV file with student details
-                      </p>
+                      </span>
+                      <span className="text-xs text-muted-foreground">
+                        or drag and drop
+                      </span>
                     </label>
                   </div>
                   <Button
@@ -527,7 +625,7 @@ export default function BulkUpload() {
                     Face Images (ZIP)
                   </CardTitle>
                   <CardDescription>
-                    Upload ZIP with images named by serial number (e.g., 1.jpg, 2.png)
+                    Upload ZIP with images named by S.No (e.g., 1.jpg, 2.png)
                   </CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-4">
@@ -545,85 +643,62 @@ export default function BulkUpload() {
                       className="cursor-pointer flex flex-col items-center gap-2"
                     >
                       <FolderArchive className="h-10 w-10 text-muted-foreground" />
-                      <p className="text-sm font-medium">
+                      <span className="text-sm font-medium">
                         {zipFile ? zipFile.name : "Click to upload ZIP"}
-                      </p>
-                      <p className="text-xs text-muted-foreground">
-                        ZIP file with face images
-                      </p>
+                      </span>
+                      <span className="text-xs text-muted-foreground">
+                        {uploadedImages.length > 0
+                          ? `${uploadedImages.length} images extracted`
+                          : "or drag and drop"}
+                      </span>
                     </label>
                   </div>
-                  {uploadedImages.length > 0 && (
-                    <p className="text-sm text-muted-foreground">
-                      {uploadedImages.length} images extracted
-                    </p>
-                  )}
                 </CardContent>
               </Card>
             </div>
 
-            {/* Training Status */}
+            {/* Summary & Actions */}
             {parsedStudents.length > 0 && (
               <Card>
                 <CardHeader>
                   <div className="flex items-center justify-between">
                     <div>
-                      <CardTitle>Training Status</CardTitle>
+                      <CardTitle className="text-lg">Upload Summary</CardTitle>
                       <CardDescription>
-                        {parsedStudents.length} students loaded from CSV
+                        {parsedStudents.length} students parsed from CSV
                       </CardDescription>
                     </div>
                     <div className="flex gap-2">
                       <Button
                         variant="outline"
-                        size="sm"
                         onClick={clearAll}
-                        disabled={isTraining}
+                        disabled={isUploading}
                       >
                         <Trash2 className="h-4 w-4 mr-2" />
                         Clear All
                       </Button>
                       <Button
-                        size="sm"
                         onClick={startBulkTraining}
-                        disabled={isTraining || pendingCount === 0}
+                        disabled={pendingCount === 0 || isUploading || !isApiAvailable}
                         className="gap-2"
                       >
-                        {isTraining ? (
+                        {isUploading ? (
                           <Loader2 className="h-4 w-4 animate-spin" />
                         ) : (
                           <Play className="h-4 w-4" />
                         )}
-                        Start Training ({pendingCount})
+                        {isUploading
+                          ? `Training... ${Math.round(trainingProgress)}%`
+                          : `Start Training (${pendingCount})`}
                       </Button>
                     </div>
                   </div>
                 </CardHeader>
                 <CardContent className="space-y-4">
-                  {/* Stats */}
-                  <div className="grid grid-cols-4 gap-4">
-                    <div className="p-3 bg-muted rounded-lg text-center">
-                      <p className="text-2xl font-bold">{pendingCount}</p>
-                      <p className="text-xs text-muted-foreground">Pending</p>
-                    </div>
-                    <div className="p-3 bg-green-100 dark:bg-green-900/20 rounded-lg text-center">
-                      <p className="text-2xl font-bold text-green-600">{successCount}</p>
-                      <p className="text-xs text-green-600">Success</p>
-                    </div>
-                    <div className="p-3 bg-red-100 dark:bg-red-900/20 rounded-lg text-center">
-                      <p className="text-2xl font-bold text-red-600">{failedCount}</p>
-                      <p className="text-xs text-red-600">Failed</p>
-                    </div>
-                    <div className="p-3 bg-yellow-100 dark:bg-yellow-900/20 rounded-lg text-center">
-                      <p className="text-2xl font-bold text-yellow-600">{noImageCount}</p>
-                      <p className="text-xs text-yellow-600">No Image</p>
-                    </div>
-                  </div>
-
                   {/* Progress */}
-                  {isTraining && (
+                  {isUploading && (
                     <div className="space-y-2">
-                      <div className="flex justify-between text-sm">
+                      <div className="flex items-center justify-between text-sm">
                         <span>Training: {currentTrainingStudent}</span>
                         <span>{Math.round(trainingProgress)}%</span>
                       </div>
@@ -631,42 +706,55 @@ export default function BulkUpload() {
                     </div>
                   )}
 
+                  {/* Status Summary */}
+                  <div className="flex gap-4 flex-wrap">
+                    <Badge variant="secondary" className="gap-1">
+                      <AlertTriangle className="h-3 w-3" />
+                      Pending: {pendingCount}
+                    </Badge>
+                    <Badge variant="default" className="gap-1 bg-green-600">
+                      <CheckCircle className="h-3 w-3" />
+                      Success: {successCount}
+                    </Badge>
+                    <Badge variant="destructive" className="gap-1">
+                      <XCircle className="h-3 w-3" />
+                      Failed: {failedCount}
+                    </Badge>
+                    <Badge variant="outline" className="gap-1">
+                      No Image: {noImageCount}
+                    </Badge>
+                  </div>
+
                   {/* Students Table */}
                   <div className="border rounded-lg overflow-hidden">
                     <Table>
                       <TableHeader>
                         <TableRow>
-                          <TableHead className="w-16">S.No</TableHead>
+                          <TableHead>S.No</TableHead>
                           <TableHead>Roll Number</TableHead>
-                          <TableHead>Student Name</TableHead>
+                          <TableHead>Name</TableHead>
                           <TableHead>Branch</TableHead>
-                          <TableHead className="w-24">Image</TableHead>
-                          <TableHead className="w-32">Status</TableHead>
+                          <TableHead className="text-center">Image</TableHead>
+                          <TableHead className="text-center">Status</TableHead>
                         </TableRow>
                       </TableHeader>
                       <TableBody>
                         {parsedStudents.slice(0, 20).map((student) => (
                           <TableRow key={student.serialNo}>
                             <TableCell>{student.serialNo}</TableCell>
-                            <TableCell className="font-mono">
+                            <TableCell className="font-mono text-sm">
                               {student.rollNumber}
                             </TableCell>
                             <TableCell>{student.studentName}</TableCell>
                             <TableCell>{student.branch}</TableCell>
-                            <TableCell>
+                            <TableCell className="text-center">
                               {student.hasImage ? (
-                                <Badge variant="secondary" className="gap-1">
-                                  <CheckCircle className="h-3 w-3" />
-                                  Yes
-                                </Badge>
+                                <CheckCircle className="h-4 w-4 text-green-600 mx-auto" />
                               ) : (
-                                <Badge variant="outline" className="gap-1 text-yellow-600">
-                                  <AlertTriangle className="h-3 w-3" />
-                                  Missing
-                                </Badge>
+                                <XCircle className="h-4 w-4 text-red-500 mx-auto" />
                               )}
                             </TableCell>
-                            <TableCell>
+                            <TableCell className="text-center">
                               {student.status === "pending" && (
                                 <Badge variant="secondary">Pending</Badge>
                               )}
@@ -677,21 +765,15 @@ export default function BulkUpload() {
                                 </Badge>
                               )}
                               {student.status === "success" && (
-                                <Badge className="bg-green-600 gap-1">
-                                  <CheckCircle className="h-3 w-3" />
+                                <Badge variant="default" className="bg-green-600">
                                   Success
                                 </Badge>
                               )}
                               {student.status === "failed" && (
-                                <Badge variant="destructive" className="gap-1">
-                                  <XCircle className="h-3 w-3" />
-                                  Failed
-                                </Badge>
+                                <Badge variant="destructive">Failed</Badge>
                               )}
                               {student.status === "no_image" && (
-                                <Badge variant="outline" className="text-yellow-600">
-                                  No Image
-                                </Badge>
+                                <Badge variant="outline">No Image</Badge>
                               )}
                             </TableCell>
                           </TableRow>
@@ -699,7 +781,7 @@ export default function BulkUpload() {
                       </TableBody>
                     </Table>
                     {parsedStudents.length > 20 && (
-                      <div className="p-3 text-center text-sm text-muted-foreground border-t">
+                      <div className="p-3 text-center text-sm text-muted-foreground bg-muted/50">
                         Showing 20 of {parsedStudents.length} students
                       </div>
                     )}
