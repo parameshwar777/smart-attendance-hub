@@ -67,6 +67,13 @@ export default function TakeAttendance() {
   const [stream, setStream] = useState<MediaStream | null>(null);
   const [allStudents, setAllStudents] = useState<any[]>([]);
   const [recognitionInterval, setRecognitionIntervalId] = useState<NodeJS.Timeout | null>(null);
+  const [lastRecognition, setLastRecognition] = useState<{
+    facesDetected: number;
+    recognizedCount: number;
+    unrecognizedCount: number;
+    error?: string;
+    at?: string;
+  } | null>(null);
 
   useEffect(() => {
     fetchTodaysClasses();
@@ -236,8 +243,9 @@ export default function TakeAttendance() {
       return null;
     }
 
-    // Downscale captures to reduce CPU + bandwidth and avoid UI freezes
-    const maxWidth = 640;
+    // Downscale captures to reduce CPU + bandwidth and avoid UI freezes.
+    // Keep enough detail for face detection.
+    const maxWidth = 960;
     const scale = Math.min(1, maxWidth / video.videoWidth);
     const targetW = Math.max(1, Math.round(video.videoWidth * scale));
     const targetH = Math.max(1, Math.round(video.videoHeight * scale));
@@ -246,9 +254,7 @@ export default function TakeAttendance() {
     canvas.height = targetH;
     context.drawImage(video, 0, 0, targetW, targetH);
 
-    const blob: Blob | null = await new Promise((resolve) =>
-      canvas.toBlob(resolve, "image/jpeg", 0.8)
-    );
+    const blob: Blob | null = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.92));
     if (!blob) return null;
 
     const dataUrl: string = await new Promise((resolve, reject) => {
@@ -277,6 +283,15 @@ export default function TakeAttendance() {
         section_id: selectedClassInfo.section_id,
         image: frameData,
         timestamp: new Date().toISOString(),
+      });
+
+      // Always record the latest backend response stats for debugging.
+      setLastRecognition({
+        facesDetected: result?.faces_detected ?? 0,
+        recognizedCount: Array.isArray(result?.recognized) ? result.recognized.length : 0,
+        unrecognizedCount: Array.isArray(result?.unrecognized) ? result.unrecognized.length : 0,
+        error: result?.error,
+        at: new Date().toLocaleTimeString(),
       });
 
       if (result?.success && result.recognized.length > 0) {
@@ -411,7 +426,8 @@ export default function TakeAttendance() {
         status: student.status,
         marked_by: user?.id,
         face_confidence: student.isManual ? null : student.confidence,
-        is_manual_override: student.isManual || false,
+        // Always send explicit boolean to avoid PostgREST inserting NULL.
+        is_manual_override: Boolean(student.isManual),
       }));
 
       // Also mark absent students
@@ -422,6 +438,9 @@ export default function TakeAttendance() {
           student_id: student.id,
           status: "absent" as const,
           marked_by: user?.id,
+          // Always include explicit boolean (fixes: null value violates not-null constraint).
+          is_manual_override: false,
+          face_confidence: null,
         }));
 
       const allRecords = [...attendanceRecords, ...absentStudents];
@@ -561,6 +580,19 @@ export default function TakeAttendance() {
                         muted
                         className="w-full h-full object-cover"
                       />
+
+                      {/* Last recognition status (helps diagnose: no detection vs no match) */}
+                      {lastRecognition && (
+                        <div className="absolute bottom-2 left-2">
+                          <Badge variant={lastRecognition.error ? "destructive" : "secondary"} className="gap-2">
+                            <span>Last scan {lastRecognition.at}</span>
+                            <span>Faces: {lastRecognition.facesDetected}</span>
+                            <span>Rec: {lastRecognition.recognizedCount}</span>
+                            <span>Unk: {lastRecognition.unrecognizedCount}</span>
+                          </Badge>
+                        </div>
+                      )}
+
                       {/* Recognition overlay */}
                       {isRecognizing && (
                         <div className="absolute inset-0 border-4 border-accent/50 rounded-lg pointer-events-none">
