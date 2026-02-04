@@ -285,6 +285,14 @@ export default function TakeAttendance() {
         timestamp: new Date().toISOString(),
       });
 
+      // Log payload to confirm correct base64 format for debugging backend.
+      console.log("Recognition payload:", {
+        class_id: selectedClass,
+        section_id: selectedClassInfo.section_id,
+        imagePrefix: frameData.slice(0, 50) + "...",
+        imageLength: frameData.length,
+      });
+
       // Always record the latest backend response stats for debugging.
       setLastRecognition({
         facesDetected: result?.faces_detected ?? 0,
