@@ -171,6 +171,24 @@ export type Database = {
         }
         Relationships: []
       }
+      face_embeddings: {
+        Row: {
+          created_at: string | null
+          embedding: number[]
+          id: string
+        }
+        Insert: {
+          created_at?: string | null
+          embedding: number[]
+          id: string
+        }
+        Update: {
+          created_at?: string | null
+          embedding?: number[]
+          id?: string
+        }
+        Relationships: []
+      }
       profiles: {
         Row: {
           avatar_url: string | null
