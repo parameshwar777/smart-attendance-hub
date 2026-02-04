@@ -101,10 +101,20 @@ export default function RegisterStudent() {
   const startCamera = async () => {
     try {
       const mediaStream = await navigator.mediaDevices.getUserMedia({
-        video: { width: 640, height: 480, facingMode: "user" },
+        audio: false,
+        video: { width: 640, height: 480, facingMode: { ideal: "user" } },
       });
       if (videoRef.current) {
+        videoRef.current.onloadedmetadata = () => {
+          videoRef.current?.play().catch(() => {
+            // Ignore autoplay/playback errors; user gesture already occurred
+          });
+        };
         videoRef.current.srcObject = mediaStream;
+        const maybePromise = videoRef.current.play();
+        if (maybePromise && typeof (maybePromise as Promise<void>).then === "function") {
+          await maybePromise;
+        }
       }
       setStream(mediaStream);
       setIsCameraActive(true);
