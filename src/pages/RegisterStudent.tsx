@@ -73,6 +73,39 @@ export default function RegisterStudent() {
     };
   }, [stream]);
 
+  // Attach stream after the <video> mounts.
+  // Fixes: permission prompt appears but preview stays blank because the video ref was null initially.
+  useEffect(() => {
+    if (!isCameraActive || !stream || !videoRef.current) return;
+
+    const videoEl = videoRef.current;
+    videoEl.srcObject = stream;
+
+    const play = async () => {
+      try {
+        await videoEl.play();
+      } catch {
+        // Ignore autoplay/playback errors
+      }
+    };
+
+    const onLoaded = () => {
+      void play();
+    };
+
+    if (videoEl.readyState >= 1) {
+      void play();
+    } else {
+      videoEl.onloadedmetadata = onLoaded;
+    }
+
+    return () => {
+      if (videoEl.onloadedmetadata === onLoaded) {
+        videoEl.onloadedmetadata = null;
+      }
+    };
+  }, [isCameraActive, stream]);
+
   const fetchDepartments = async () => {
     const { data } = await supabase.from("departments").select("*").order("name");
     setDepartments(data || []);
@@ -104,18 +137,6 @@ export default function RegisterStudent() {
         audio: false,
         video: { width: 640, height: 480, facingMode: { ideal: "user" } },
       });
-      if (videoRef.current) {
-        videoRef.current.onloadedmetadata = () => {
-          videoRef.current?.play().catch(() => {
-            // Ignore autoplay/playback errors; user gesture already occurred
-          });
-        };
-        videoRef.current.srcObject = mediaStream;
-        const maybePromise = videoRef.current.play();
-        if (maybePromise && typeof (maybePromise as Promise<void>).then === "function") {
-          await maybePromise;
-        }
-      }
       setStream(mediaStream);
       setIsCameraActive(true);
     } catch (error) {

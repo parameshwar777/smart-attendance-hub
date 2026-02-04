@@ -82,6 +82,38 @@ export default function TakeAttendance() {
     };
   }, [stream, recognitionInterval]);
 
+  // Attach stream after <video> mounts (camera preview was blank when ref was null during startCamera).
+  useEffect(() => {
+    if (!isCameraActive || !stream || !videoRef.current) return;
+
+    const videoEl = videoRef.current;
+    videoEl.srcObject = stream;
+
+    const play = async () => {
+      try {
+        await videoEl.play();
+      } catch {
+        // Ignore autoplay/playback errors
+      }
+    };
+
+    const onLoaded = () => {
+      void play();
+    };
+
+    if (videoEl.readyState >= 1) {
+      void play();
+    } else {
+      videoEl.onloadedmetadata = onLoaded;
+    }
+
+    return () => {
+      if (videoEl.onloadedmetadata === onLoaded) {
+        videoEl.onloadedmetadata = null;
+      }
+    };
+  }, [isCameraActive, stream]);
+
   const fetchTodaysClasses = async () => {
     const today = new Date().toISOString().split("T")[0];
     
@@ -145,18 +177,6 @@ export default function TakeAttendance() {
         audio: false,
         video: { width: 1280, height: 720, facingMode: { ideal: "user" } },
       });
-      if (videoRef.current) {
-        videoRef.current.onloadedmetadata = () => {
-          videoRef.current?.play().catch(() => {
-            // Ignore autoplay/playback errors; user gesture already occurred
-          });
-        };
-        videoRef.current.srcObject = mediaStream;
-        const maybePromise = videoRef.current.play();
-        if (maybePromise && typeof (maybePromise as Promise<void>).then === "function") {
-          await maybePromise;
-        }
-      }
       setStream(mediaStream);
       setIsCameraActive(true);
     } catch (error) {
