@@ -205,17 +205,28 @@ export default function TakeAttendance() {
   };
 
   const captureFrame = useCallback((): string | null => {
-    if (!videoRef.current || !canvasRef.current) return null;
+    if (!videoRef.current || !canvasRef.current) {
+      console.log("captureFrame: refs not ready", { video: !!videoRef.current, canvas: !!canvasRef.current });
+      return null;
+    }
 
     const video = videoRef.current;
     const canvas = canvasRef.current;
     const context = canvas.getContext("2d");
 
+    // Check if video is actually playing with valid dimensions
+    if (video.videoWidth === 0 || video.videoHeight === 0) {
+      console.log("captureFrame: video dimensions are 0, stream not ready");
+      return null;
+    }
+
     if (context) {
       canvas.width = video.videoWidth;
       canvas.height = video.videoHeight;
       context.drawImage(video, 0, 0);
-      return canvas.toDataURL("image/jpeg", 0.8);
+      const dataUrl = canvas.toDataURL("image/jpeg", 0.8);
+      console.log("captureFrame: captured frame", { width: canvas.width, height: canvas.height });
+      return dataUrl;
     }
     return null;
   }, []);
@@ -261,7 +272,18 @@ export default function TakeAttendance() {
     }
   }, [selectedClass, todaysClasses, captureFrame, recognize, toast]);
 
-  const startRecognition = () => {
+  const startRecognition = async () => {
+    // Ensure video is fully ready before starting
+    const video = videoRef.current;
+    if (!video || video.videoWidth === 0 || video.videoHeight === 0) {
+      toast({
+        title: "Camera Not Ready",
+        description: "Please wait for the camera to fully initialize before starting recognition.",
+        variant: "destructive",
+      });
+      return;
+    }
+
     setIsRecognizing(true);
     
     toast({
@@ -274,7 +296,16 @@ export default function TakeAttendance() {
     setRecognitionIntervalId(intervalId);
     
     // Do an immediate recognition
-    performRecognition();
+    try {
+      await performRecognition();
+    } catch (error) {
+      console.error("Recognition error:", error);
+      toast({
+        title: "Recognition Error",
+        description: error instanceof Error ? error.message : "Failed to perform recognition",
+        variant: "destructive",
+      });
+    }
   };
 
   const stopRecognition = () => {
