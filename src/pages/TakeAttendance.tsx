@@ -72,16 +72,25 @@ export default function TakeAttendance() {
     fetchTodaysClasses();
   }, [user]);
 
+  // Cleanup camera stream when it changes or on unmount.
+  // IMPORTANT: Do NOT depend on recognitionInterval here; changing the interval would
+  // trigger cleanup and stop the camera, causing the preview to go black.
   useEffect(() => {
     return () => {
       if (stream) {
-        stream.getTracks().forEach(track => track.stop());
+        stream.getTracks().forEach((track) => track.stop());
       }
+    };
+  }, [stream]);
+
+  // Cleanup recognition interval when it changes or on unmount.
+  useEffect(() => {
+    return () => {
       if (recognitionInterval) {
         clearInterval(recognitionInterval);
       }
     };
-  }, [stream, recognitionInterval]);
+  }, [recognitionInterval]);
 
   // Attach stream after <video> mounts (camera preview was blank when ref was null during startCamera).
   useEffect(() => {
