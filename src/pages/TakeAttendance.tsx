@@ -49,6 +49,7 @@ export default function TakeAttendance() {
   const { toast } = useToast();
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const recognitionInFlightRef = useRef(false);
   
   const {
     isApiAvailable,
@@ -199,14 +200,18 @@ export default function TakeAttendance() {
       clearInterval(recognitionInterval);
       setRecognitionIntervalId(null);
     }
+    recognitionInFlightRef.current = false;
     setStream(null);
     setIsCameraActive(false);
     setIsRecognizing(false);
   };
 
-  const captureFrame = useCallback((): string | null => {
+  const captureFrameBase64 = useCallback(async (): Promise<string | null> => {
     if (!videoRef.current || !canvasRef.current) {
-      console.log("captureFrame: refs not ready", { video: !!videoRef.current, canvas: !!canvasRef.current });
+      console.log("captureFrame: refs not ready", {
+        video: !!videoRef.current,
+        canvas: !!canvasRef.current,
+      });
       return null;
     }
 
@@ -214,63 +219,84 @@ export default function TakeAttendance() {
     const canvas = canvasRef.current;
     const context = canvas.getContext("2d");
 
+    if (!context) return null;
+
     // Check if video is actually playing with valid dimensions
     if (video.videoWidth === 0 || video.videoHeight === 0) {
       console.log("captureFrame: video dimensions are 0, stream not ready");
       return null;
     }
 
-    if (context) {
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
-      context.drawImage(video, 0, 0);
-      const dataUrl = canvas.toDataURL("image/jpeg", 0.8);
-      console.log("captureFrame: captured frame", { width: canvas.width, height: canvas.height });
-      return dataUrl;
-    }
-    return null;
+    // Downscale captures to reduce CPU + bandwidth and avoid UI freezes
+    const maxWidth = 640;
+    const scale = Math.min(1, maxWidth / video.videoWidth);
+    const targetW = Math.max(1, Math.round(video.videoWidth * scale));
+    const targetH = Math.max(1, Math.round(video.videoHeight * scale));
+
+    canvas.width = targetW;
+    canvas.height = targetH;
+    context.drawImage(video, 0, 0, targetW, targetH);
+
+    const blob: Blob | null = await new Promise((resolve) =>
+      canvas.toBlob(resolve, "image/jpeg", 0.8)
+    );
+    if (!blob) return null;
+
+    const dataUrl: string = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onloadend = () => resolve(String(reader.result || ""));
+      reader.onerror = () => reject(new Error("Failed to encode frame"));
+      reader.readAsDataURL(blob);
+    });
+
+    console.log("captureFrame: captured frame", { width: canvas.width, height: canvas.height });
+    return dataUrl;
   }, []);
 
   const performRecognition = useCallback(async () => {
+    if (recognitionInFlightRef.current) return;
     const selectedClassInfo = todaysClasses.find(c => c.id === selectedClass);
     if (!selectedClassInfo) return;
 
-    const frameData = captureFrame();
-    if (!frameData) return;
+    recognitionInFlightRef.current = true;
+    try {
+      const frameData = await captureFrameBase64();
+      if (!frameData) return;
 
-    const result = await recognize({
-      class_id: selectedClass,
-      section_id: selectedClassInfo.section_id,
-      image: frameData,
-      timestamp: new Date().toISOString(),
-    });
-
-    if (result?.success && result.recognized.length > 0) {
-      // Add newly recognized students (avoid duplicates)
-      setDetectedStudents(prev => {
-        const newStudents = [...prev];
-        for (const face of result.recognized) {
-          if (!newStudents.find(s => s.id === face.student_id)) {
-            newStudents.push({
-              id: face.student_id,
-              rollNumber: face.roll_number,
-              fullName: face.student_name,
-              confidence: face.confidence,
-              status: "present",
-            });
-          }
-        }
-        return newStudents;
+      const result = await recognize({
+        class_id: selectedClass,
+        section_id: selectedClassInfo.section_id,
+        image: frameData,
+        timestamp: new Date().toISOString(),
       });
 
-      if (result.recognized.length > 0) {
+      if (result?.success && result.recognized.length > 0) {
+        // Add newly recognized students (avoid duplicates)
+        setDetectedStudents(prev => {
+          const newStudents = [...prev];
+          for (const face of result.recognized) {
+            if (!newStudents.find(s => s.id === face.student_id)) {
+              newStudents.push({
+                id: face.student_id,
+                rollNumber: face.roll_number,
+                fullName: face.student_name,
+                confidence: face.confidence,
+                status: "present",
+              });
+            }
+          }
+          return newStudents;
+        });
+
         toast({
           title: "Faces Recognized",
           description: `${result.recognized.length} new student(s) detected`,
         });
       }
+    } finally {
+      recognitionInFlightRef.current = false;
     }
-  }, [selectedClass, todaysClasses, captureFrame, recognize, toast]);
+  }, [selectedClass, todaysClasses, captureFrameBase64, recognize, toast]);
 
   const startRecognition = async () => {
     // Ensure video is fully ready before starting
@@ -284,6 +310,13 @@ export default function TakeAttendance() {
       return;
     }
 
+    // Ensure playback stays active when the UI re-renders
+    try {
+      await video.play();
+    } catch {
+      // ignore
+    }
+
     setIsRecognizing(true);
     
     toast({
@@ -292,7 +325,9 @@ export default function TakeAttendance() {
     });
 
     // Perform recognition every 2 seconds
-    const intervalId = setInterval(performRecognition, 2000);
+    const intervalId = setInterval(() => {
+      void performRecognition();
+    }, 2000);
     setRecognitionIntervalId(intervalId);
     
     // Do an immediate recognition
@@ -313,6 +348,7 @@ export default function TakeAttendance() {
       clearInterval(recognitionInterval);
       setRecognitionIntervalId(null);
     }
+    recognitionInFlightRef.current = false;
     setIsRecognizing(false);
     toast({
       title: "Recognition Stopped",
